@@ -1,0 +1,447 @@
+---
+title: "MA678 Midterm Project"
+author: Zhihui Zhang
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+library(tidyverse)
+library(naniar)
+library(UpSetR)
+library(corrplot)
+library(stringr)
+library ("purrr")
+library(treemap)
+library(treemapify)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lattice)
+library(MASS)
+library(performance)
+library(see)
+library(ggridges)
+library(forcats)
+library(viridis)
+library("texreg")
+library(sjPlot)
+library(multimode)
+library(coxme)
+library(ehahelper)
+library(broom)
+library(ggfortify)
+library(arm)
+library(verification)
+library(performance)
+library(ROCR)
+library(scales) 
+library(fmsb)
+library(pals)
+library(RColorBrewer)
+options(scipen = 999)
+#load data
+data <- read.csv('netflix-rotten-tomatoes-metacritic-imdb.csv')
+head(data)
+```
+
+
+```{r include=FALSE}
+#subset the data I will use
+data <- data %>% dplyr::select(Title, Genre, Languages, Series.or.Movie, Hidden.Gem.Score, Country.Availability, Runtime, IMDb.Score, Awards.Received, Awards.Nominated.For,IMDb.Votes, Boxoffice, Release.Date, Netflix.Release.Date)
+ 
+data <- data %>% filter(!is.na(IMDb.Score)&!is.na(Hidden.Gem.Score))
+#tidy data
+data$Boxoffice <- as.numeric(str_replace_all(str_sub(data$Boxoffice, 2), ',',''))
+data$Main.Genre <- ifelse(str_detect(data$Genre, ','), word(data$Genre, 1, sep = ','), data$Genre)
+data$Main.Genre <- ifelse(data$Main.Genre == "", NA, data$Main.Genre)
+data$Release.Date <- as.Date(data$Release.Date, "%d %b %Y")
+data$Netflix.Release.Date <- as.Date(data$Netflix.Release.Date)
+data$Date.Difference <- as.numeric(data$Netflix.Release.Date - data$Release.Date)
+data$Date.Difference <- ifelse(data$Date.Difference < 0, 0, data$Date.Difference)
+data$Year <- as.numeric(format(data$Netflix.Release.Date, "%Y"))
+data$Gem <- 1*(data$Hidden.Gem.Score> 5)
+genre_count <- data.frame(table(data$Main.Genre))
+#genre_count
+sel_main_genre <- genre_count$Var1[genre_count$Freq >= 500]
+data <- data %>% filter(Main.Genre %in% sel_main_genre)
+
+```
+
+## Abstract
+
+This project explored the relationship between the hidden gems score of videos provided on Netflix, a subscription streaming and production companies in the United States, and their characteristics including genre, the number of awards nominated and the number of languages provided, etc. The multilevel logistic model indicates that TV series are more likely to become hidden gems. And the criteria of the hidden gems not only vary by genre but also time. This report consists of 5 main parts: Introduction, Method, Result, and Discussion. 
+
+## Introduction
+
+Netflix, one of the biggest subscription streaming and production companies, has over 214 million subscribers worldwide. Besides providing subscription streaming, Netflix originals have made up 40% of Netflix's overall library in the United States. 
+
+However, many Netflix subscribers complain about the quantity over the quality issue, especially in TV series. Instead of recommending high-quality videos, they think Netflix recommends too much junk information. Netflix recommendation engine is based on the following categories: 
+
+1. users' interactions with their service
+
+2. other members with similar tastes and preferences on their service
+
+3. information about the titles, such as their genre, categories, actors, release year
+
+The factors are reasonable when they have abundant logs of users' behaviors(including ratings, watch time, etc.) Yet, movies or TV series that have less user activity make it challenging for the recommendation engine to track it and then eventually suggest it to users. Netflix noticed that problem and named those videos as hidden gems - the videos are outstanding but are watched by few people. Why those movies or TV series are hidden from the public's views? Do hidden gems videos share some common characteristics? If we could uncover the puzzles, then we may further improve the recommendations.
+
+When thinking about exploring the relationship between hidden gems score and characteristics of the videos, there are several approaches. Based on my exploratory data analysis, as the distribution of response variable - hidden gem scores has two modes, I applied mode assessment to demonstrate the distribution is bimodal and located the estimated antimonide point. The latter helped me convert the hidden gem scores into a binary variable which 1 indicates the video is a hidden gem while 0 indicates the video is not. Then I created some features including the number of languages the videos provided in the subtitles, the number of countries where videos are available, and the day difference, etc. The details of the features are shown in feature engineering parts.
+
+To uncover the hidden gems in Netflix, I applied a multilevel logistic model to explore the features of hidden gems in Netflix. 
+
+\newpage
+
+## Method
+
+```{r include=FALSE}
+#check missing rate
+#for( col in 1:ncol(data)){
+#print(paste(colnames(data)[col],sum(is.na(data[,col]))/nrow(data)))
+#}
+
+#data imputation
+data$Awards.Nominated.For <- ifelse(is.na(data$Awards.Nominated.For),0, data$Awards.Nominated.For)
+data$Awards.Received <- ifelse(is.na(data$Awards.Received),0, data$Awards.Received)
+
+#language 
+lan_list <- list()
+for(i in 1:nrow(data)){
+  lan_list[i] <- strsplit(data$Languages[i], ",")
+}
+languages <- unlist(lan_list)
+languages<- str_replace_all(languages, ' ', '')
+#if we only consider the number of language, in different genre
+data$Languages_num <- lengths(lan_list)
+#data cleaning for country availability 
+coun_list <- list()
+for(i in 1:nrow(data)){
+  coun_list[i] <- strsplit(data$Country.Availability[i], ",")
+}
+countries <- unlist(coun_list)
+countries<- str_replace_all(countries, ' ', '')
+data$Country_num <- lengths(coun_list)
+```
+
+```{r include=FALSE}
+#subset the data again
+data <- data %>% dplyr::select(Hidden.Gem.Score, Main.Genre, Series.or.Movie, IMDb.Score, IMDb.Votes,Awards.Nominated.For, Date.Difference, Languages_num, Country_num, Year, Gem)
+
+#exclude rows with missing values
+data <- na.omit(data)
+```
+
+
+### Data Source
+
+The data is published on [Kaagle: Latest Netflix data with 26+ joined  attributes](https://www.kaggle.com/ashishgup/netflix-rotten-tomatoes-metacritic-imdb). It contains data from 4 different APIs. In the data set, there is a unique metric called 'Hidden Gem Score', which is calculated by the owner of the data set using low review count and high rating. Generally speaking, the lower the review count and higher the user rating, the higher the hidden gem score. I chose 5 as the cut-off point based on the mode test to create a new binary variable called Gem as my response variable. 
+The data dictionary of the data set can be seen in the appendix part. After data cleaning and processing, I have 11062 observations, 10 exploratory variables, and 1 response variable to do further analysis. 
+
+### Feature Engineering
+For features creation, I think the number of the country available for each video may be a good feature. Not all videos on Netflix are available in all the regions where Netflix provides services, which means the exposure of videos are different. Therefore, the number of the country available may relate to the hidden gems score of the video. Then, the number of languages the videos provided in the subtitles also may affect the people's watching. In this way, I also created a new variable to indicate how many languages a video provides. Besides, an older movie or TV series may not be known to younger people, which means those videos might be more likely to be considered as a hidden gem. The difference date was created in the data shows the number of days difference between the release on Netflix and released in the cinema.
+I also added one more variable called Year to indicate the year of video release on Netflix. We might need to account for variability in time paths as random slopes in the further analysis.
+
+### Exploratory Data Analysis
+
+Figure 1 below shows the distributions of hidden gems score in different genres and different types of video. It is interesting that most of them are clearly bimodally distributed. Regardless of movies or TV series, when the hidden gems score is lower than 5, most videos will fall in the interval between 2.5 and 3 points; when the hidden gems score is higher than 5, most videos will center around 7.5 points. To simplify the model, 5 was chosen as the cut-off to show whether a video belongs to hidden gems on Netflix. And for some genres, the distribution of hidden gem scores changes across time. That made me think of adding time and genre as random effects in the model.
+
+```{r echo=FALSE, fig.height=6, fig.width=13, fig.cap="Distribution of Hidden Gem Scores in Different Genres and Types", fig.align='center'}
+#distribution 
+ggplot(data, aes(y=Main.Genre, x = Hidden.Gem.Score, fill=Main.Genre, color =Main.Genre )) +
+    geom_density_ridges(alpha=0.6, stat="binline", bins=20) +
+    theme_ridges() +
+    theme(
+     legend.position="none",
+    panel.spacing = unit(0.1, "lines"),
+    strip.text.x = element_text(size = 8)#,
+   # axis.text=element_text(size=40),
+     # axis.title=element_text(size=30,face="bold")
+    ) +
+    ylab("Main Genre") +
+    xlab("Assigned Probability (%)") + 
+    facet_grid(.~Year)
+```
+
+
+
+```{r echo=FALSE, fig.height=4, fig.width=6, fig.cap = "Distribution of IMDb Scores in Different Genres and Types", fig.align='center'}
+par(mfrow = c(2, 1))
+ggplot(data, aes(x = IMDb.Score, y = Main.Genre, fill = Main.Genre)) +
+  geom_density_ridges() +
+  theme_ridges() + 
+  theme(legend.position = "none")+
+  scale_fill_viridis(discrete = TRUE) +
+    theme(
+      legend.position="none"#,
+      # axis.text=element_text(size=40),
+      #axis.title=element_text(size=30,face="bold")
+    ) +
+    xlab("IMDb.Score") + 
+   facet_grid(.~Series.or.Movie)
+```
+```{r echo=FALSE, fig.height=5, fig.width=5, fig.cap = "Correlation matrix", fig.align='center'}
+num_feat <- character(0)
+for(i in 1:length(colnames(data))){
+  if(typeof(data[[i]]) %in% c('double','integer') & colnames(data)[i]!= 'Hidden.Gem.Score'){
+    num_feat <- c(num_feat, colnames(data)[i])
+  }
+}
+data_num <- subset(data, select = num_feat)
+
+# use complete observations
+res <- cor(data_num)
+
+corrplot::corrplot(res, type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+```
+
+When we consider the distribution of IMDb scores, it's quite different from the hidden gem scores. The distributions of IMDb scores in different genres above are usually normally distributed. I also noticed that the distribution of IMDb scores varies by main genres, but the difference is nuance. Besides, if we facet the plot using year, the distribution is almost the same with the time change. But there is a difference between the type of videos in IMDb scores. I might consider the interaction term in the fixed effects part instead of using Main.Genre as random effects accounts for variability in IMDb.scores.The correlation matrix above indicates that there is no multicollinearity problem among these variables. 
+
+
+## Model Fittig 
+
+```{r echo = FALSE }
+mod1 <- glmer(data = data, Gem ~ -1 + 
+                log(Awards.Nominated.For + 1) + 
+                Country_num + Languages_num + 
+                IMDb.Score*Series.or.Movie + 
+                (1 + Languages_num | Main.Genre:Year) + 
+                (1 + Country_num|Year) + 
+                (1 + log(Awards.Nominated.For + 1)|Year), 
+              family= "binomial")
+```
+Considering different genre and year, I will use multilevel generalized linear models to fit the data. And for awards nominated, I used log scale and include Year as random effects as the EDA in appendix part shows. I also add IMDb.Score, Series.or.Movie and their interaction to account for the difference in the distribution in different types of videos. Also I used random effects to account for the variability in availability of country and languages across time. 
+
+Below is the function and complete cofficients is reported in the appendix. 
+```{r eval=FALSE}
+model <- glmer(data = data, Gem ~ -1 + 
+                log(Awards.Nominated.For + 1) + 
+                Country_num + Languages_num + 
+                IMDb.Score*Series.or.Movie + 
+                (1 + Languages_num | Main.Genre:Year) + 
+                (1 + Country_num|Year) + 
+                (1 + log(Awards.Nominated.For + 1)|Year), 
+              family= "binomial")
+```
+
+## Result
+
+### ROC curve and AUC score
+
+Before reporting coefficients of variables, I also set threshold as 0.5 and used AUC score as indicator to measure the performance of the model. The AUC score is 0.862 indicating that the model performs well in classifying the hidden gems. 
+```{r echo = FALSE}
+pred <- predict(mod1, type = 'response')
+pred <- prediction(pred, data$Gem)
+perf <-  performance(pred, "acc")
+```
+
+```{r echo = FALSE, out.width='1\\linewidth', fig.asp=0.5, fig.ncol = 1, fig.cap="Cut off and ROC curve ",fig.align = "center"}
+par(mfrow = c(1, 2))
+plot(perf) 
+roc = performance(pred,"tpr","fpr")
+plot(roc, col = 'blue', lwd = 2)
+abline(a = 0, b = 1) 
+auc <- performance(pred, measure = "auc")
+auc_score <- round(auc@y.values[[1]],3)
+text(0.4, 0.6, labels= paste("AUC:", auc_score))
+```
+
+\newpage
+
+## Model Coefficients
+
+It is a little bit hard to show coefficients in all genres and years. We pick Documentary and 2018 as example to illustrate the model coefficients. 
+
+$$ Gem = invlogit(-0.79\cdot log(awards.nominated.for + 1) - 0.11\cdot Country\_num $$ 
+$$- 0.09\cdot Languages\_num +  1.61\cdot Series.or.Movie Movie $$
+$$ + 5.64\cdot Series.or.Movie Movie + 0.08\cdot IMDb.Score $$
+$$ -0.47\cdot IMDb.Score:Series.or.Movie) $$
+
+From the above coefficients, we can conclude that when considering availability, the number of the country available have more effects than the number of languages. The coefficient of series or movie is larger than 1, but the coefficients for TV series is larger. It could be interpreted as a TV series multiplied by 56 the probability of considered to be hidden gems compared to movies when the IMDb scores are the same. The effects of IMDb scores on TV series and movies are also different. 
+
+
+
+## Discussion
+
+The model performs well and the coefficients are reasonable to some extents. Since we included two random effects - main genre and year in the model, it made the interpretation part harder and less intuitive. 
+
+But we still can see that in genera, time is a important factor when we considering hidden gems. That might came from the development of technology and change in people's mind - more and more people are willing to watch videos online and enjoy personal recommendations. Also, time might impact the values that videos try to convey in different genres. Some people might like it some people might not. Some niche videos with high rates might become popular topic. In this way, the videos are still good, but they are not belong to hidden gems anymore.
+
+There are something not change. Even though account the variability in time, the more awards the videos are nominated, the less probability that the videos is considered to be hidden gems. And for number of languages, the situations are the same. This coincides with my assumption that more availability more exposure and then less likely to become a hidden gems. 
+Also, compared to TV series, TV series are more likely to be considered as hidden gems. There might be some TV series without an attracting beginning but they becomes better later. They are less likely to be found by people.
+
+However, there are some variables like box offices, day difference between video release in public and release on Netflix that I did not include in the model. I think they might have some relationship with hidden gems. For day difference, the relationship may be complex and the model can not capture it. If I have data to indicates the Netflix original films and others, the day difference might be more meaningful. Also directors, actors and actress, run time of the video might also have effects on hidden gems. However, if we group by directors or actors, there are only a few records in each group. Besides, usually there are more than one directors and main actors or actress in one video. Which one we should choose to do the grouping? For further improvements, I might find some different clustering methods to group them and add them as group levels predictors. 
+ 
+ 
+\newpage
+## Appendix
+
+### Data Cleaning and Processing
+
+#### 1. Data Cleaning
+
+In the data cleaning part, I tidied up Genre, Country, Languages, Box offices in the original data set. For Genre, I subset the first genre in the genre list and created a new feature called Main.Genre. Then I converted the strings in the Languages and Country.Availability into a list. That might help me do the feature engineering in the later part. For Boxoffice, I first got rid of the `$` at the beginning of the number. And Then I removed `,` separator in the box offices. What's more, I converted two release date into the same format. 
+Besides, after finding that the response variable - Hidden.Gem.Score follows bimodal distribution from the below test. Instead of using a mixed effects linear model to estimate the hidden gem scores, I chose 5 as a cut-off to convert it to a binary variable and estimated the model using mixed effects logistic regression. 
+
+```{r echo=FALSE}
+modetest(data$Hidden.Gem.Score)
+locmodes(data$Hidden.Gem.Score,mod0=2,display=F)
+```
+
+
+### 2. Data Processing
+After cleaning the data, I calculated the missing rate for each variable. I will only use videos whose Main Genre has more than 500 records in the total data set. And here is the missing rate table for the data I would like to use in further analysis. For minimizing potential bias in the model fitting part, I set the threshold of the missing rate as 50%. Therefore, I would not use box offices in the future. For Awards.Nominated.For and Awards.Received, since they are highly correlated and Awards.Received missed more than 50% of the data, I removed it and only used Awards.Nominated.For. I filled the missing value with 0. And it is reasonable that if the video does not receive a award or isn't nominated, then those columns will be 0. 
+
+| column names                 | missing rate|
+| :--:                         | :-----      |
+| Boxoffice                    | 0.705|
+| Release.Date                 | 0.022| 
+| Date.Difference              | 0.022|
+| Awards.Received              | 0.544|
+| Awards.Nominated.For         | 0.423|
+
+Below is the data dictionary for the variables I might include in my model. 
+
+| column names                 | explanation |
+| :--:                         | :-----      |
+| Hiddem.Gem.Score             | The hidden gem score that calculated from |
+| Gem                          | Whether the video is a hidden gem | 
+| Main.Genre                   | The main genre of the video |
+| IMDb.Score                   | The IMDb score of the video |
+| Awards.Nominated.For         | The number of awards that the video has been nominated |
+| Date.Difference              | The number of days between the video release and its release on Netflix |
+| IMDb.Votes                   | The number of votes of the video from IMDb website |
+| Series.or.Movie              | Indicate the type of video: TV series or Movie |
+| Languages_num                | The number of subtitle languages |
+| Country_num                  | The number of countries where the video is available |
+| Year                         | The year of the movie release on Netflix |
+
+
+\newpage
+
+### More Exploratory Data Analysis
+```{r echo=FALSE, fig.height=6, fig.width=10, fig.cap="Number of records in different language availability acorss year"}
+data %>% group_by(Year, Languages_num) %>%
+  summarise(num_of_record = n()) %>%
+ ggplot(aes(x=Year, y = num_of_record, color = factor(Languages_num))) +
+  geom_point(aes(x=Year, y = num_of_record)) + 
+  geom_line(linetype = "dashed") 
+```
+
+```{r echo=FALSE, fig.height=6, fig.width=10, fig.cap="Distribution Country number in different genre acorss time"}
+
+ggplot(data, aes(x = Country_num, y = Main.Genre, fill = Main.Genre)) +
+  geom_density_ridges() +
+  theme_ridges() + 
+  theme(legend.position = "none")+
+  scale_fill_viridis(discrete = TRUE) +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11)
+    ) +
+    #ggtitle("") +
+    xlab("Country_num") + 
+  facet_grid(.~Year) 
+```
+
+```{r echo=FALSE, fig.height=6, fig.width=10, fig.cap="Radar plot"}
+radar_data <- data %>% group_by(Main.Genre) %>% dplyr::summarise(
+  languange_num = mean(Languages_num), country_num = mean(Country_num),
+  IMDb.votes = mean(log(IMDb.Votes+1)), IMDb.score = mean(IMDb.Score), 
+  awards.nominated = mean(log(Awards.Nominated.For+1))
+)
+
+coul <- c(brewer.pal(n = 9, name = 'BuPu')[2:9],brewer.pal(n=12, name='GnBu')[2:9] )
+colors_border <- coul
+colors_in <- alpha(coul,0.3)
+rownames(radar_data) <- radar_data$Main.Genre
+
+radarchart(radar_data[,-1]  , axistype=1 , maxmin=F,
+    #custom polygon
+    pcol= colors_border , pfcol=colors_in , plwd=1 , plty=1,
+    #custom the grid
+    cglcol="grey", cglty=1, axislabcol="black", cglwd=1, 
+    #custom labels
+    vlcex=0.8 
+    )
+legend(x= 1.4, y= 1.4, legend = rownames(radar_data), bty = "n", pch= 20, col= coul , text.col = "grey", cex=1, pt.cex=3)
+
+```
+
+```{r echo=FALSE, fig.height=6, fig.width=10, fig.cap="Awards Nominated change acorss time"}
+ggplot(data, aes(x = log(Awards.Nominated.For+1), y = Year)) +
+  geom_density_ridges() +
+  theme_ridges() + 
+  theme(legend.position = "none")+
+  scale_fill_viridis(discrete = TRUE) +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11)
+    ) +
+    xlab("log(IMDb.Votes)")+
+  facet_grid(.~Year)
+```
+
+\newpage
+
+## Model Validation
+
+There is no much concerns about the assumptions of the model. 
+```{r echo = FALSE, fig.height=4, fig.width= 6, fig.cap = 'Binned Residual Plot and QQ plot', fig.align='left'}
+par(mfrow = c(1, 2))
+arm::binnedplot(predict(mod1, type = 'response') ,resid(mod1),
+    xlab="Expected Values", ylab="Average residual", 
+    main="Binned residual plot", 
+    cex.pts=0.8, col.pts=1, col.int="gray")
+qqnorm(resid(mod1))
+``` 
+
+
+
+\newpage
+## Reference
+
+A beginner’s guide to lmer
+https://rstudio-pubs-static.s3.amazonaws.com/63556_e35cc7e2dfb54a5bb551f3fa4b3ec4ae.html
+
+An Introduction to corrplot Package
+https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html
+
+Calculating AUC: the area under a ROC Curve
+https://www.r-bloggers.com/2016/11/calculating-auc-the-area-under-a-roc-curve/
+
+How to detect heteroscedasticity and rectify it?
+https://www.r-bloggers.com/2016/01/how-to-detect-heteroscedasticity-and-rectify-it/
+
+Mixed Effects Modeling Tips: Use a Fast Optimizer, but Perform Optimizer Checks
+http://svmiller.com/blog/2018/06/mixed-effects-models-optimizer-checks/
+
+Deriving Logistic Regression
+https://rpubs.com/benhorvath/logistic_regression
+
+
+\newpage
+### Complete Results of the Model
+
+Random effects
+```{r echo=FALSE}
+#library(stargazer)
+#stargazer(mod1, type="latex")
+ranef(mod1)
+#stargazer(stargazer(mod1, type="latex"), type="latex")
+```
+
+Fixed effects
+```{r echo=FALSE}
+fixef(mod1)
+```
+
+Coefficients of model
+```{r echo=FALSE}
+coef(mod1)
+```
+
